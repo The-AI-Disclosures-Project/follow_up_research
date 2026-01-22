@@ -1,0 +1,376 @@
+"""
+Analyze follow-up suggestion results from the jan-15 dataset.
+Produces JSON outputs in data/processed_data/json/
+"""
+
+import pandas as pd
+import json
+import math
+import os
+from datetime import datetime
+
+# Ensure output directory exists
+OUTPUT_DIR = 'data/minified'
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def stream_jsonl(file_path):
+    with open(file_path, 'r') as file:
+        for line in file:
+            yield json.loads(line)
+
+
+def calculate_turns(conversation):
+    """Calculate number of turns (skip the first message)."""
+    return math.ceil((len(conversation[1:])) / 2)
+
+
+def count_words(text):
+    """Count words in text."""
+    if not text:
+        return 0
+    return len(text.split())
+
+
+def calculate_word_counts(conversation):
+    """Calculate word counts per turn and totals.
+
+    Follows existing turn logic: skip first message, then pair (user, assistant).
+    """
+    user_word_counts = []
+    assistant_word_counts = []
+
+    # Match existing turn calculation: skip first message, process pairs
+    messages = conversation[1:]
+    for i in range(0, len(messages), 2):
+        user_msg = messages[i] if i < len(messages) else None
+        assistant_msg = messages[i+1] if i+1 < len(messages) else None
+
+        user_words = count_words(user_msg.get('content', '')) if user_msg else 0
+        assistant_words = count_words(assistant_msg.get('content', '')) if assistant_msg else 0
+
+        user_word_counts.append(user_words)
+        assistant_word_counts.append(assistant_words)
+
+    return {
+        'user_word_counts_per_turn': user_word_counts,
+        'assistant_word_counts_per_turn': assistant_word_counts,
+        'user_word_count': sum(user_word_counts),
+        'assistant_word_count': sum(assistant_word_counts),
+        'total_word_count': sum(user_word_counts) + sum(assistant_word_counts)
+    }
+
+
+def extract_follow_up_data(follow_up_data_row):
+    """Extract follow-up suggestion data from a conversation row."""
+    suggestions_given_per_turn = []
+    suggestion_used_flags_per_turn = []
+    suggestion_used_counts_per_turn = []
+    strict_suggestion_used_flags_per_turn = []
+    strict_suggestion_used_counts_per_turn = []
+
+    for turn in follow_up_data_row['conversation_turns']:
+        ai_message_info = turn['AIMessageInformation']
+        user_message_info = turn['UserMessageInformation']
+
+        # In the jan-15 dataset, follow_up_suggestions is a direct array
+        # (not nested under another follow_up_suggestions key)
+        suggestions_offered = ai_message_info.get('follow_up_suggestions', [])
+
+        # Handle both list of dicts with suggestion_id and empty list formats
+        turn_suggestion_ids = []
+        if suggestions_offered and isinstance(suggestions_offered, list):
+            if len(suggestions_offered) > 0 and isinstance(suggestions_offered[0], dict):
+                turn_suggestion_ids = [s.get('suggestion_id') for s in suggestions_offered if s.get('suggestion_id')]
+
+        used_suggestion_ids = user_message_info.get('used_follow_up_suggestions_ids', [])
+        strict_used_suggestion_ids = list(set(turn_suggestion_ids) & set(used_suggestion_ids))
+
+        num_suggestions_offered = len(suggestions_offered) if suggestions_offered else 0
+
+        suggestions_given_per_turn.append(num_suggestions_offered)
+        strict_suggestion_used_counts_per_turn.append(len(strict_used_suggestion_ids))
+
+        suggestion_was_used = len(used_suggestion_ids) > 0
+        strict_suggestion_was_used = len(strict_used_suggestion_ids) > 0
+
+        strict_suggestion_used_flags_per_turn.append(strict_suggestion_was_used)
+        suggestion_used_flags_per_turn.append(suggestion_was_used)
+        suggestion_used_counts_per_turn.append(len(used_suggestion_ids))
+
+    total_suggestions_given_count = sum(suggestions_given_per_turn)
+
+    return {
+        'suggestions_given_per_turn': suggestions_given_per_turn,
+        'suggestion_used_flags_per_turn': suggestion_used_flags_per_turn,
+        'suggestion_used_counts_per_turn': suggestion_used_counts_per_turn,
+        'num_turns_with_suggestions_used': sum(suggestion_used_flags_per_turn),
+        'total_suggestions_used': sum(suggestion_used_counts_per_turn),
+        'strict_suggestion_used_counts_per_turn': strict_suggestion_used_counts_per_turn,
+        'strict_suggestion_used_flags_per_turn': strict_suggestion_used_flags_per_turn,
+        'total_suggestions_given_count': total_suggestions_given_count
+    }
+
+
+def main():
+    print("Loading data...")
+    df = pd.read_json('data/processed_data/extracted_follow_ups.jsonl', orient='records', lines=True)
+    df.index = df['index']
+    df.drop(columns=['index'], inplace=True)
+    print(f"Loaded {len(df)} conversations")
+
+    # Load source data for metadata (model, timestamp, language, and additional fields)
+    print("Loading source metadata from filtered_15k.jsonl...")
+    source_df = pd.read_json('data/wildchat/filtered_15k.jsonl', orient='records', lines=True)
+    source_metadata = source_df.set_index('conversation_hash')[
+        ['model', 'timestamp', 'language', 'state', 'country', 'hashed_ip', 'toxic', 'redacted', 'header', 'conversation']
+    ].to_dict('index')
+
+    # Extract metadata by joining with source data
+    print("Extracting metadata...")
+    df['timestamp'] = None
+    df['model'] = None
+    df['year'] = None
+    df['language'] = None
+    df['state'] = None
+    df['country'] = None
+    df['hashed_ip'] = None
+    df['toxic'] = None
+    df['redacted'] = None
+    df['header'] = None
+    df['header'] = df['header'].astype('object')
+    # Word count columns
+    df['user_word_counts_per_turn'] = None
+    df['user_word_counts_per_turn'] = df['user_word_counts_per_turn'].astype('object')
+    df['assistant_word_counts_per_turn'] = None
+    df['assistant_word_counts_per_turn'] = df['assistant_word_counts_per_turn'].astype('object')
+    df['user_word_count'] = None
+    df['assistant_word_count'] = None
+    df['total_word_count'] = None
+
+    for i, row in df.iterrows():
+        conv_hash = row['conversation_hash']
+        if conv_hash in source_metadata:
+            metadata = source_metadata[conv_hash]
+            df.loc[i, 'model'] = metadata.get('model')
+            df.loc[i, 'timestamp'] = metadata.get('timestamp')
+            df.loc[i, 'language'] = metadata.get('language')
+            df.loc[i, 'state'] = metadata.get('state')
+            df.loc[i, 'country'] = metadata.get('country')
+            df.loc[i, 'hashed_ip'] = metadata.get('hashed_ip')
+            df.loc[i, 'toxic'] = metadata.get('toxic')
+            df.loc[i, 'redacted'] = metadata.get('redacted')
+            df.at[i, 'header'] = metadata.get('header')
+
+            # Extract year from timestamp
+            timestamp = metadata.get('timestamp')
+            if timestamp:
+                try:
+                    timestamp_dt = pd.to_datetime(timestamp)
+                    df.loc[i, 'year'] = timestamp_dt.year
+                except:
+                    pass
+
+            # Calculate word counts from source conversation
+            source_conversation = metadata.get('conversation', [])
+            if source_conversation:
+                word_counts = calculate_word_counts(source_conversation)
+                df.at[i, 'user_word_counts_per_turn'] = word_counts['user_word_counts_per_turn']
+                df.at[i, 'assistant_word_counts_per_turn'] = word_counts['assistant_word_counts_per_turn']
+                df.loc[i, 'user_word_count'] = word_counts['user_word_count']
+                df.loc[i, 'assistant_word_count'] = word_counts['assistant_word_count']
+                df.loc[i, 'total_word_count'] = word_counts['total_word_count']
+
+    # Initialize columns
+    print("Processing follow-up data...")
+    df.loc[:, 'suggestions_given_per_turn'] = None
+    df.loc[:, 'suggestion_used_flags_per_turn'] = None
+    df.loc[:, 'suggestion_used_counts_per_turn'] = None
+    df.loc[:, 'strict_suggestion_used_counts_per_turn'] = None
+    df.loc[:, 'strict_suggestion_used_flags_per_turn'] = None
+    df.loc[:, 'total_suggestions_given_count'] = None
+
+    df.loc[:, 'suggestions_given_per_turn'] = df.loc[:, 'suggestions_given_per_turn'].astype('object')
+    df.loc[:, 'suggestion_used_flags_per_turn'] = df.loc[:, 'suggestion_used_flags_per_turn'].astype('object')
+    df.loc[:, 'suggestion_used_counts_per_turn'] = df.loc[:, 'suggestion_used_counts_per_turn'].astype('object')
+    df.loc[:, 'strict_suggestion_used_counts_per_turn'] = df.loc[:, 'strict_suggestion_used_counts_per_turn'].astype('object')
+    df.loc[:, 'strict_suggestion_used_flags_per_turn'] = df.loc[:, 'strict_suggestion_used_flags_per_turn'].astype('object')
+    df.loc[:, 'total_suggestions_used'] = None
+    df.loc[:, 'turns_match'] = None
+
+    # Apply the function to the follow_up_data column
+    for i, row in df.iterrows():
+        extracted_data = extract_follow_up_data(row['follow_up_data'])
+        df.at[i, 'suggestions_given_per_turn'] = extracted_data['suggestions_given_per_turn']
+        df.at[i, 'suggestion_used_flags_per_turn'] = extracted_data['suggestion_used_flags_per_turn']
+        df.at[i, 'suggestion_used_counts_per_turn'] = extracted_data['suggestion_used_counts_per_turn']
+        df.loc[i, 'num_turns_with_suggestions_used'] = extracted_data['num_turns_with_suggestions_used']
+        df.loc[i, 'total_suggestions_used'] = extracted_data['total_suggestions_used']
+        df.at[i, 'total_suggestions_given_count'] = extracted_data['total_suggestions_given_count']
+        df.at[i, 'strict_suggestion_used_counts_per_turn'] = extracted_data['strict_suggestion_used_counts_per_turn']
+        df.at[i, 'strict_suggestion_used_flags_per_turn'] = extracted_data['strict_suggestion_used_flags_per_turn']
+
+    df['turns'] = df.apply(lambda row: calculate_turns(row['conversation']), axis=1)
+    df.loc[:, 'turns_match'] = df.apply(lambda row: len(row['suggestions_given_per_turn']) == row.turns, axis=1)
+
+    # Filter to only matching turns
+    df_filtered = df[df['turns_match']].copy()
+    print(f"Filtered to {len(df_filtered)} conversations with matching turns")
+
+    # Output 1: Flattened data (one row per turn)
+    print("Creating flattened output...")
+    flattened_data = []
+    for i, row in df_filtered.iterrows():
+        turns = row.turns
+        conversation_hash = row.conversation_hash
+        year = row.year
+        timestamp = row.timestamp
+        language = row.language
+        model = row.model
+        state = row.state
+        country = row.country
+        hashed_ip = row.hashed_ip
+        toxic = row.toxic
+        redacted = row.redacted
+        header = row.header
+        user_word_counts = row['user_word_counts_per_turn'] or []
+        assistant_word_counts = row['assistant_word_counts_per_turn'] or []
+
+        for turn in range(turns):
+            suggestion_given_count = row['suggestions_given_per_turn'][turn]
+            suggestion_used_count = row['suggestion_used_counts_per_turn'][turn]
+            suggestion_used_flag = row['suggestion_used_flags_per_turn'][turn]
+            strict_suggestion_used_count = row['strict_suggestion_used_counts_per_turn'][turn]
+            strict_suggestion_used_flag = row['strict_suggestion_used_flags_per_turn'][turn]
+            conversation_continued = turn < turns - 1
+            user_word_count = user_word_counts[turn] if turn < len(user_word_counts) else 0
+            assistant_word_count = assistant_word_counts[turn] if turn < len(assistant_word_counts) else 0
+
+            flattened_data.append({
+                'conversation_hash': conversation_hash,
+                'year': int(year) if pd.notna(year) else None,
+                'timestamp': str(timestamp) if pd.notna(timestamp) else None,
+                'language': language,
+                'model': model,
+                'state': state,
+                'country': country,
+                'hashed_ip': hashed_ip,
+                'toxic': bool(toxic) if pd.notna(toxic) else None,
+                'redacted': bool(redacted) if pd.notna(redacted) else None,
+                'header': header,
+                'turn': turn + 1,
+                'turns': turns,
+                'suggestion_given_count': suggestion_given_count,
+                'suggestion_used_count': suggestion_used_count,
+                'suggestion_used_flag': suggestion_used_flag,
+                'strict_suggestion_used_count': strict_suggestion_used_count,
+                'strict_suggestion_used_flag': strict_suggestion_used_flag,
+                'conversation_continued': conversation_continued,
+                'user_word_count': user_word_count,
+                'assistant_word_count': assistant_word_count
+            })
+
+    flattened_path = os.path.join(OUTPUT_DIR, 'analysis_data_flattened.jsonl')
+    with open(flattened_path, 'w') as f:
+        for record in flattened_data:
+            f.write(json.dumps(record) + '\n')
+    print(f"Saved flattened data to {flattened_path}")
+
+    # Output 2: Minified results (one row per conversation)
+    print("Creating minified output...")
+    minified_data = []
+    for i, row in df_filtered.iterrows():
+        minified_data.append({
+            'conversation_hash': row['conversation_hash'],
+            'timestamp': str(row['timestamp']) if pd.notna(row['timestamp']) else None,
+            'year': int(row['year']) if pd.notna(row['year']) else None,
+            'language': row['language'],
+            'model': row['model'],
+            'state': row['state'],
+            'country': row['country'],
+            'hashed_ip': row['hashed_ip'],
+            'toxic': bool(row['toxic']) if pd.notna(row['toxic']) else None,
+            'redacted': bool(row['redacted']) if pd.notna(row['redacted']) else None,
+            'header': row['header'],
+            'suggestions_given_per_turn': row['suggestions_given_per_turn'],
+            'suggestion_used_flags_per_turn': row['suggestion_used_flags_per_turn'],
+            'suggestion_used_counts_per_turn': row['suggestion_used_counts_per_turn'],
+            'strict_suggestion_used_counts_per_turn': row['strict_suggestion_used_counts_per_turn'],
+            'strict_suggestion_used_flags_per_turn': row['strict_suggestion_used_flags_per_turn'],
+            'total_suggestions_given_count': row['total_suggestions_given_count'],
+            'total_suggestions_used': row['total_suggestions_used'],
+            'num_turns_with_suggestions_used': row['num_turns_with_suggestions_used'],
+            'turns': row['turns'],
+            'user_word_counts_per_turn': row['user_word_counts_per_turn'],
+            'assistant_word_counts_per_turn': row['assistant_word_counts_per_turn'],
+            'user_word_count': int(row['user_word_count']) if pd.notna(row['user_word_count']) else None,
+            'assistant_word_count': int(row['assistant_word_count']) if pd.notna(row['assistant_word_count']) else None,
+            'total_word_count': int(row['total_word_count']) if pd.notna(row['total_word_count']) else None
+        })
+
+    minified_path = os.path.join(OUTPUT_DIR, 'analysis_data.jsonl')
+    with open(minified_path, 'w') as f:
+        for record in minified_data:
+            f.write(json.dumps(record) + '\n')
+    print(f"Saved minified data to {minified_path}")
+
+    # Output 3: Summary statistics
+    print("Calculating summary statistics...")
+    total_conversations = len(df_filtered)
+    convs_with_suggestions = (df_filtered['total_suggestions_given_count'] > 0).sum()
+    convs_with_suggestions_used = (df_filtered['total_suggestions_used'] > 0).sum()
+
+    # Year distribution
+    year_counts = df_filtered['year'].value_counts().to_dict()
+    year_counts = {int(k) if pd.notna(k) else 'unknown': int(v) for k, v in year_counts.items()}
+
+    # Language distribution
+    language_counts = df_filtered['language'].value_counts().head(10).to_dict()
+
+    # Average suggestions per year
+    avg_suggestions_by_year = df_filtered.groupby('year')['total_suggestions_given_count'].mean().to_dict()
+    avg_suggestions_by_year = {int(k) if pd.notna(k) else 'unknown': float(v) for k, v in avg_suggestions_by_year.items()}
+
+    # Average suggestions per year (excluding zero)
+    df_with_suggestions = df_filtered[df_filtered['total_suggestions_given_count'] > 0]
+    if len(df_with_suggestions) > 0:
+        avg_suggestions_by_year_nonzero = df_with_suggestions.groupby('year')['total_suggestions_given_count'].mean().to_dict()
+        avg_suggestions_by_year_nonzero = {int(k) if pd.notna(k) else 'unknown': float(v) for k, v in avg_suggestions_by_year_nonzero.items()}
+    else:
+        avg_suggestions_by_year_nonzero = {}
+
+    summary = {
+        'total_conversations': int(total_conversations),
+        'conversations_with_suggestions': int(convs_with_suggestions),
+        'conversations_with_suggestions_used': int(convs_with_suggestions_used),
+        'suggestion_usage_rate': float(convs_with_suggestions_used / convs_with_suggestions * 100) if convs_with_suggestions > 0 else 0,
+        'year_distribution': year_counts,
+        'language_distribution': language_counts,
+        'avg_suggestions_by_year': avg_suggestions_by_year,
+        'avg_suggestions_by_year_nonzero': avg_suggestions_by_year_nonzero
+    }
+
+    summary_path = os.path.join(OUTPUT_DIR, 'summary_stats.json')
+    with open(summary_path, 'w') as f:
+        json.dump(summary, f, indent=2)
+    print(f"Saved summary statistics to {summary_path}")
+
+    # Print summary
+    print("\n" + "="*50)
+    print("SUMMARY")
+    print("="*50)
+    print(f"Total conversations: {total_conversations}")
+    print(f"Conversations with suggestions: {convs_with_suggestions}")
+    print(f"Conversations with suggestions used: {convs_with_suggestions_used}")
+    if convs_with_suggestions > 0:
+        print(f"Suggestion usage rate: {convs_with_suggestions_used / convs_with_suggestions * 100:.2f}%")
+    print(f"\nYear distribution:")
+    for year, count in sorted(year_counts.items(), key=lambda x: str(x[0])):
+        print(f"  {year}: {count}")
+    print(f"\nTop languages:")
+    for lang, count in list(language_counts.items())[:5]:
+        print(f"  {lang}: {count}")
+
+
+if __name__ == '__main__':
+    main()
