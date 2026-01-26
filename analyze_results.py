@@ -69,9 +69,9 @@ def extract_follow_up_data(follow_up_data_row):
     strict_suggestion_used_flags_per_turn = []
     strict_suggestion_used_counts_per_turn = []
 
-    for turn in follow_up_data_row['conversation_turns']:
-        ai_message_info = turn['AIMessageInformation']
-        user_message_info = turn['UserMessageInformation']
+    for turn in follow_up_data_row.get('conversation_turns', []):
+        ai_message_info = turn.get('AIMessageInformation', {})
+        user_message_info = turn.get('UserMessageInformation', {})
 
         # In the jan-15 dataset, follow_up_suggestions is a direct array
         # (not nested under another follow_up_suggestions key)
@@ -113,105 +113,146 @@ def extract_follow_up_data(follow_up_data_row):
 
 
 def main():
-    print("Loading data...")
+    # First pass: stream source metadata to build lookup (memory-efficient)
+    print("Streaming source metadata from filtered_45k.jsonl...")
+    source_metadata = {}
+    for record in stream_jsonl('data/wildchat/filtered_45k.jsonl'):
+        conv_hash = record.get('conversation_hash')
+        if conv_hash:
+            # Calculate word counts immediately instead of storing full conversation
+            conversation = record.get('conversation', [])
+            word_counts = calculate_word_counts(conversation) if conversation else None
+
+            source_metadata[conv_hash] = {
+                'model': record.get('model'),
+                'timestamp': record.get('timestamp'),
+                'language': record.get('language'),
+                'state': record.get('state'),
+                'country': record.get('country'),
+                'hashed_ip': record.get('hashed_ip'),
+                'toxic': record.get('toxic'),
+                'redacted': record.get('redacted'),
+                'header': record.get('header'),
+                'word_counts': word_counts
+            }
+    print(f"Loaded metadata for {len(source_metadata)} conversations")
+
+    print("Loading extracted follow-ups data...")
     df = pd.read_json('data/processed_data/extracted_follow_ups_45k.jsonl', orient='records', lines=True)
     df.index = df['index']
     df.drop(columns=['index'], inplace=True)
     print(f"Loaded {len(df)} conversations")
 
-    # Load source data for metadata (model, timestamp, language, and additional fields)
-    print("Loading source metadata from filtered_45k.jsonl...")
-    source_df = pd.read_json('data/wildchat/filtered_45k.jsonl', orient='records', lines=True)
-    source_metadata = source_df.set_index('conversation_hash')[
-        ['model', 'timestamp', 'language', 'state', 'country', 'hashed_ip', 'toxic', 'redacted', 'header', 'conversation']
-    ].to_dict('index')
-
     # Extract metadata by joining with source data
     print("Extracting metadata...")
-    df['timestamp'] = None
-    df['model'] = None
-    df['year'] = None
-    df['language'] = None
-    df['state'] = None
-    df['country'] = None
-    df['hashed_ip'] = None
-    df['toxic'] = None
-    df['redacted'] = None
-    df['header'] = None
-    df['header'] = df['header'].astype('object')
-    # Word count columns
-    df['user_word_counts_per_turn'] = None
-    df['user_word_counts_per_turn'] = df['user_word_counts_per_turn'].astype('object')
-    df['assistant_word_counts_per_turn'] = None
-    df['assistant_word_counts_per_turn'] = df['assistant_word_counts_per_turn'].astype('object')
-    df['user_word_count'] = None
-    df['assistant_word_count'] = None
-    df['total_word_count'] = None
 
-    for i, row in df.iterrows():
+    # Build metadata lists for bulk assignment (more efficient and avoids pandas assignment issues)
+    timestamps = []
+    models = []
+    years = []
+    languages = []
+    states = []
+    countries = []
+    hashed_ips = []
+    toxics = []
+    redacteds = []
+    headers = []
+    user_word_counts_per_turn = []
+    assistant_word_counts_per_turn = []
+    user_word_counts = []
+    assistant_word_counts = []
+    total_word_counts = []
+
+    for _, row in df.iterrows():
         conv_hash = row['conversation_hash']
-        if conv_hash in source_metadata:
-            metadata = source_metadata[conv_hash]
-            df.loc[i, 'model'] = metadata.get('model')
-            df.loc[i, 'timestamp'] = metadata.get('timestamp')
-            df.loc[i, 'language'] = metadata.get('language')
-            df.loc[i, 'state'] = metadata.get('state')
-            df.loc[i, 'country'] = metadata.get('country')
-            df.loc[i, 'hashed_ip'] = metadata.get('hashed_ip')
-            df.loc[i, 'toxic'] = metadata.get('toxic')
-            df.loc[i, 'redacted'] = metadata.get('redacted')
-            df.at[i, 'header'] = metadata.get('header')
+        metadata = source_metadata.get(conv_hash, {})
 
-            # Extract year from timestamp
-            timestamp = metadata.get('timestamp')
-            if timestamp:
-                try:
-                    timestamp_dt = pd.to_datetime(timestamp)
-                    df.loc[i, 'year'] = timestamp_dt.year
-                except:
-                    pass
+        timestamps.append(metadata.get('timestamp'))
+        models.append(metadata.get('model'))
+        languages.append(metadata.get('language'))
+        states.append(metadata.get('state'))
+        countries.append(metadata.get('country'))
+        hashed_ips.append(metadata.get('hashed_ip'))
+        toxics.append(metadata.get('toxic'))
+        redacteds.append(metadata.get('redacted'))
+        headers.append(metadata.get('header'))
 
-            # Calculate word counts from source conversation
-            source_conversation = metadata.get('conversation', [])
-            if source_conversation:
-                word_counts = calculate_word_counts(source_conversation)
-                df.at[i, 'user_word_counts_per_turn'] = word_counts['user_word_counts_per_turn']
-                df.at[i, 'assistant_word_counts_per_turn'] = word_counts['assistant_word_counts_per_turn']
-                df.loc[i, 'user_word_count'] = word_counts['user_word_count']
-                df.loc[i, 'assistant_word_count'] = word_counts['assistant_word_count']
-                df.loc[i, 'total_word_count'] = word_counts['total_word_count']
+        # Extract year from timestamp
+        timestamp = metadata.get('timestamp')
+        year = None
+        if timestamp:
+            try:
+                timestamp_dt = pd.to_datetime(timestamp)
+                year = timestamp_dt.year
+            except:
+                pass
+        years.append(year)
 
-    # Initialize columns
+        # Use pre-computed word counts from streaming step
+        word_counts = metadata.get('word_counts')
+        if word_counts:
+            user_word_counts_per_turn.append(word_counts['user_word_counts_per_turn'])
+            assistant_word_counts_per_turn.append(word_counts['assistant_word_counts_per_turn'])
+            user_word_counts.append(word_counts['user_word_count'])
+            assistant_word_counts.append(word_counts['assistant_word_count'])
+            total_word_counts.append(word_counts['total_word_count'])
+        else:
+            user_word_counts_per_turn.append(None)
+            assistant_word_counts_per_turn.append(None)
+            user_word_counts.append(None)
+            assistant_word_counts.append(None)
+            total_word_counts.append(None)
+
+    # Bulk assign all metadata columns
+    df['timestamp'] = timestamps
+    df['model'] = models
+    df['year'] = years
+    df['language'] = languages
+    df['state'] = states
+    df['country'] = countries
+    df['hashed_ip'] = hashed_ips
+    df['toxic'] = toxics
+    df['redacted'] = redacteds
+    df['header'] = headers
+    df['user_word_counts_per_turn'] = user_word_counts_per_turn
+    df['assistant_word_counts_per_turn'] = assistant_word_counts_per_turn
+    df['user_word_count'] = user_word_counts
+    df['assistant_word_count'] = assistant_word_counts
+    df['total_word_count'] = total_word_counts
+
+    # Process follow-up data using bulk assignment
     print("Processing follow-up data...")
-    df.loc[:, 'suggestions_given_per_turn'] = None
-    df.loc[:, 'suggestion_used_flags_per_turn'] = None
-    df.loc[:, 'suggestion_used_counts_per_turn'] = None
-    df.loc[:, 'strict_suggestion_used_counts_per_turn'] = None
-    df.loc[:, 'strict_suggestion_used_flags_per_turn'] = None
-    df.loc[:, 'total_suggestions_given_count'] = None
+    suggestions_given_per_turn_list = []
+    suggestion_used_flags_per_turn_list = []
+    suggestion_used_counts_per_turn_list = []
+    strict_suggestion_used_counts_per_turn_list = []
+    strict_suggestion_used_flags_per_turn_list = []
+    num_turns_with_suggestions_used_list = []
+    total_suggestions_used_list = []
+    total_suggestions_given_count_list = []
 
-    df.loc[:, 'suggestions_given_per_turn'] = df.loc[:, 'suggestions_given_per_turn'].astype('object')
-    df.loc[:, 'suggestion_used_flags_per_turn'] = df.loc[:, 'suggestion_used_flags_per_turn'].astype('object')
-    df.loc[:, 'suggestion_used_counts_per_turn'] = df.loc[:, 'suggestion_used_counts_per_turn'].astype('object')
-    df.loc[:, 'strict_suggestion_used_counts_per_turn'] = df.loc[:, 'strict_suggestion_used_counts_per_turn'].astype('object')
-    df.loc[:, 'strict_suggestion_used_flags_per_turn'] = df.loc[:, 'strict_suggestion_used_flags_per_turn'].astype('object')
-    df.loc[:, 'total_suggestions_used'] = None
-    df.loc[:, 'turns_match'] = None
-
-    # Apply the function to the follow_up_data column
-    for i, row in df.iterrows():
+    for _, row in df.iterrows():
         extracted_data = extract_follow_up_data(row['follow_up_data'])
-        df.at[i, 'suggestions_given_per_turn'] = extracted_data['suggestions_given_per_turn']
-        df.at[i, 'suggestion_used_flags_per_turn'] = extracted_data['suggestion_used_flags_per_turn']
-        df.at[i, 'suggestion_used_counts_per_turn'] = extracted_data['suggestion_used_counts_per_turn']
-        df.loc[i, 'num_turns_with_suggestions_used'] = extracted_data['num_turns_with_suggestions_used']
-        df.loc[i, 'total_suggestions_used'] = extracted_data['total_suggestions_used']
-        df.at[i, 'total_suggestions_given_count'] = extracted_data['total_suggestions_given_count']
-        df.at[i, 'strict_suggestion_used_counts_per_turn'] = extracted_data['strict_suggestion_used_counts_per_turn']
-        df.at[i, 'strict_suggestion_used_flags_per_turn'] = extracted_data['strict_suggestion_used_flags_per_turn']
+        suggestions_given_per_turn_list.append(extracted_data['suggestions_given_per_turn'])
+        suggestion_used_flags_per_turn_list.append(extracted_data['suggestion_used_flags_per_turn'])
+        suggestion_used_counts_per_turn_list.append(extracted_data['suggestion_used_counts_per_turn'])
+        strict_suggestion_used_counts_per_turn_list.append(extracted_data['strict_suggestion_used_counts_per_turn'])
+        strict_suggestion_used_flags_per_turn_list.append(extracted_data['strict_suggestion_used_flags_per_turn'])
+        num_turns_with_suggestions_used_list.append(extracted_data['num_turns_with_suggestions_used'])
+        total_suggestions_used_list.append(extracted_data['total_suggestions_used'])
+        total_suggestions_given_count_list.append(extracted_data['total_suggestions_given_count'])
 
-    df['turns'] = df.apply(lambda row: calculate_turns(row['conversation']), axis=1)
-    df.loc[:, 'turns_match'] = df.apply(lambda row: len(row['suggestions_given_per_turn']) == row.turns, axis=1)
+    df['suggestions_given_per_turn'] = suggestions_given_per_turn_list
+    df['suggestion_used_flags_per_turn'] = suggestion_used_flags_per_turn_list
+    df['suggestion_used_counts_per_turn'] = suggestion_used_counts_per_turn_list
+    df['strict_suggestion_used_counts_per_turn'] = strict_suggestion_used_counts_per_turn_list
+    df['strict_suggestion_used_flags_per_turn'] = strict_suggestion_used_flags_per_turn_list
+    df['num_turns_with_suggestions_used'] = num_turns_with_suggestions_used_list
+    df['total_suggestions_used'] = total_suggestions_used_list
+    df['total_suggestions_given_count'] = total_suggestions_given_count_list
+
+    df['turns'] = df['conversation'].apply(calculate_turns)
+    df['turns_match'] = df.apply(lambda row: len(row['suggestions_given_per_turn']) == row['turns'], axis=1)
 
     # Filter to only matching turns
     df_filtered = df[df['turns_match']].copy()
