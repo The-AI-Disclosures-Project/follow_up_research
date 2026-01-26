@@ -114,14 +114,14 @@ def extract_follow_up_data(follow_up_data_row):
 
 def main():
     print("Loading data...")
-    df = pd.read_json('data/processed_data/extracted_follow_ups.jsonl', orient='records', lines=True)
+    df = pd.read_json('data/processed_data/extracted_follow_ups_45k.jsonl', orient='records', lines=True)
     df.index = df['index']
     df.drop(columns=['index'], inplace=True)
     print(f"Loaded {len(df)} conversations")
 
     # Load source data for metadata (model, timestamp, language, and additional fields)
-    print("Loading source metadata from filtered_15k.jsonl...")
-    source_df = pd.read_json('data/wildchat/filtered_15k.jsonl', orient='records', lines=True)
+    print("Loading source metadata from filtered_45k.jsonl...")
+    source_df = pd.read_json('data/wildchat/filtered_45k.jsonl', orient='records', lines=True)
     source_metadata = source_df.set_index('conversation_hash')[
         ['model', 'timestamp', 'language', 'state', 'country', 'hashed_ip', 'toxic', 'redacted', 'header', 'conversation']
     ].to_dict('index')

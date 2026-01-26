@@ -8,8 +8,10 @@ import argparse
 import ast
 import datetime as _dt
 import json
+import logging
 import os
-from re import S
+import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
 from datetime import datetime
@@ -20,8 +22,16 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict
 from tqdm import tqdm
 
+# Global logger for file logging (thread-safe)
+file_logger = None
+
+# Lock for output file writes
+output_file_lock = threading.Lock()
+
 dotenv.load_dotenv()
 
+# Regex pattern to extract conversation_hash without full JSON parsing
+HASH_PATTERN = re.compile(r'"conversation_hash"\s*:\s*"([^"]+)"')
 
 # ==================== Safe Evaluator for Parsing ====================
 
@@ -201,7 +211,11 @@ def build_input_string(row) -> str:
 
 
 def load_processed_hashes(output_file: str) -> Set[str]:
-    """Load conversation hashes that have already been processed."""
+    """Load conversation hashes without parsing full JSON records.
+
+    Uses regex extraction for memory efficiency - avoids allocating
+    full dict objects for each record when we only need the hash.
+    """
     processed_hashes = set()
 
     if not os.path.exists(output_file):
@@ -210,20 +224,57 @@ def load_processed_hashes(output_file: str) -> Set[str]:
     try:
         with open(output_file, 'r') as f:
             for line in f:
-                if line.strip():
-                    data = json.loads(line)
-                    if 'conversation_hash' in data:
-                        processed_hashes.add(data['conversation_hash'])
+                match = HASH_PATTERN.search(line)
+                if match:
+                    processed_hashes.add(match.group(1))
     except Exception as e:
         print(f"Warning: Error loading processed hashes from {output_file}: {e}")
 
     return processed_hashes
 
 
-def append_result_to_file(result: dict, output_file: str):
-    """Append a single result to the output JSONL file."""
-    with open(output_file, 'a') as f:
-        f.write(json.dumps(result, cls=DateTimeEncoder, ensure_ascii=False) + '\n')
+def load_existing_results(processed_file: str) -> dict[str, dict]:
+    """Load all results from a processed file, keyed by conversation_hash."""
+    existing_results = {}
+    if not os.path.exists(processed_file):
+        return existing_results
+    try:
+        with open(processed_file, 'r') as f:
+            for line in f:
+                if line.strip():
+                    data = json.loads(line)
+                    if 'conversation_hash' in data:
+                        existing_results[data['conversation_hash']] = data
+    except Exception as e:
+        print(f"Warning: Error loading existing results from {processed_file}: {e}")
+    return existing_results
+
+
+def append_result_to_file(result: dict, output_file: str, output_lock: 'threading.Lock'):
+    """Append a single result to the output JSONL file (thread-safe)."""
+    line = json.dumps(result, cls=DateTimeEncoder, ensure_ascii=False) + '\n'
+    with output_lock:
+        with open(output_file, 'a') as f:
+            f.write(line)
+
+
+def setup_file_logger(log_file: str):
+    """Set up a thread-safe file logger."""
+    global file_logger
+    file_logger = logging.getLogger('process_wildchat')
+    file_logger.setLevel(logging.DEBUG)
+
+    # Remove existing handlers
+    file_logger.handlers.clear()
+
+    # Create file handler
+    handler = logging.FileHandler(log_file, mode='a')
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    file_logger.addHandler(handler)
+
+    # Prevent propagation to root logger
+    file_logger.propagate = False
 
 
 def process_row(index_row_tuple, system_prompt: str, api_key: str, model: str, log_file: str = None, max_retries: int = 2):
@@ -232,10 +283,9 @@ def process_row(index_row_tuple, system_prompt: str, api_key: str, model: str, l
     start_time = time.time()
 
     def log(msg):
-        """Log message to file if log_file is provided."""
-        if log_file:
-            with open(log_file, 'a') as f:
-                f.write(f"{msg}\n")
+        """Log message using thread-safe logger."""
+        if file_logger:
+            file_logger.info(msg)
 
     try:
         # Build input
@@ -485,14 +535,14 @@ def main():
     parser.add_argument(
         '--input',
         type=str,
-        default='data/wildchat/filtered_15k.jsonl',
-        help='Input JSONL file containing wildchat conversations (default: data/wildchat/filtered_15k.jsonl)'
+        default='data/wildchat/filtered_45k.jsonl',
+        help='Input JSONL file containing wildchat conversations (default: data/wildchat/filtered_45k.jsonl)'
     )
     parser.add_argument(
         '--output',
         type=str,
-        default='data/processed_data/extracted_follow_ups.jsonl',
-        help='Output JSONL file to save results (default: data/processed_data/extracted_follow_ups.jsonl)'
+        default='data/processed_data/extracted_follow_ups_45k.jsonl',
+        help='Output JSONL file to save results (default: data/processed_data/extracted_follow_ups_45k.jsonl)'
     )
     parser.add_argument(
         '--system-prompt',
@@ -535,6 +585,12 @@ def main():
         default='data/processed_data/logs.txt',
         help='Log file for detailed processing logs (default: data/processed_data/logs.txt)'
     )
+    parser.add_argument(
+        '--reuse-from',
+        type=str,
+        default=None,
+        help='Path to existing processed JSONL file to reuse results from (for conversations with matching hashes)'
+    )
 
     args = parser.parse_args()
 
@@ -566,77 +622,135 @@ def main():
     processed_hashes = load_processed_hashes(args.output)
     print(f"Found {len(processed_hashes)} already processed conversations")
 
-    # Load input data
-    print(f"\nLoading input data from {args.input}...")
-    df = pd.read_json(args.input, lines=True)
-    print(f"Loaded {len(df)} conversations")
+    # Stream input data - only load unprocessed rows to save memory
+    print(f"\nStreaming input data from {args.input} (filtering as we read)...")
+    rows_to_process = []
+    seen_hashes = set()
+    total_lines = 0
+    skipped_processed = 0
+    skipped_language = 0
+    skipped_short = 0
+    skipped_duplicate = 0
 
-    # Parse conversations
-    df['year'] = pd.to_datetime(df['timestamp']).dt.year
+    with open(args.input, 'r') as f:
+        for line in f:
+            total_lines += 1
+            if not line.strip():
+                continue
 
-    # Check if conversation needs parsing or is already parsed
-    first_conv = df['conversation'].iloc[0]
-    if isinstance(first_conv, str):
-        df['conversation_compiled'] = df['conversation'].apply(parse_pythonish_record)
-    else:
-        df['conversation_compiled'] = df['conversation']
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
-    # Filter
-    print(f"\nApplying filters...")
-    initial_count = len(df)
+            conv_hash = record.get('conversation_hash')
 
-    # Filter for English only
-    if 'language' in df.columns:
-        before_lang = len(df)
-        df = df[df['language'] == 'English']
-        print(f"  After English-only filter: {len(df)} ({before_lang - len(df)} removed)")
+            # Skip already processed
+            if conv_hash in processed_hashes:
+                skipped_processed += 1
+                continue
 
-    before_min_len = len(df)
-    df = df[df['conversation_compiled'].apply(lambda x: len(x)) >= 2]
-    print(f"  After min length (>=2 messages): {len(df)} ({before_min_len - len(df)} removed)")
+            # Skip duplicates within this file
+            if conv_hash in seen_hashes:
+                skipped_duplicate += 1
+                continue
+            seen_hashes.add(conv_hash)
 
-    before_dedup = len(df)
-    df.drop_duplicates(subset=['conversation_hash'], inplace=True, keep='last')
-    print(f"  After deduplication: {len(df)} ({before_dedup - len(df)} duplicates removed)")
+            # Filter for English only
+            if record.get('language') != 'English':
+                skipped_language += 1
+                continue
 
-    # Filter out already processed
-    before_processed = len(df)
-    df = df[~df['conversation_hash'].isin(processed_hashes)]
-    print(f"  After removing already processed: {len(df)} ({before_processed - len(df)} removed)")
-    print(f"\nTotal to process: {len(df)} conversations")
+            # Parse conversation
+            conv = record.get('conversation')
+            if isinstance(conv, str):
+                try:
+                    conv = parse_pythonish_record(conv)
+                except Exception:
+                    continue
+            record['conversation_compiled'] = conv
+
+            # Filter for min length
+            if len(conv) < 2:
+                skipped_short += 1
+                continue
+
+            # Create a simple namespace object to match expected interface
+            class Row:
+                pass
+            row = Row()
+            row.conversation_hash = conv_hash
+            row.conversation_compiled = conv
+            row.turn = record.get('turn', len(conv) // 2)
+
+            rows_to_process.append(row)
+
+    print(f"  Total lines read: {total_lines}")
+    print(f"  Skipped (already processed): {skipped_processed}")
+    print(f"  Skipped (non-English): {skipped_language}")
+    print(f"  Skipped (too short): {skipped_short}")
+    print(f"  Skipped (duplicate): {skipped_duplicate}")
+    print(f"\nTotal to process: {len(rows_to_process)} conversations")
+
+    # Handle reuse from existing results file
+    reused_count = 0
+    if args.reuse_from and len(rows_to_process) > 0:
+        print(f"\nLoading existing results to reuse from {args.reuse_from}...")
+        reuse_results = load_existing_results(args.reuse_from)
+        print(f"Loaded {len(reuse_results)} existing results for potential reuse")
+
+        # Find conversations that can be reused
+        current_hashes = {row.conversation_hash for row in rows_to_process}
+        reusable_hashes = current_hashes & set(reuse_results.keys())
+
+        if reusable_hashes:
+            print(f"Found {len(reusable_hashes)} conversations to reuse (skipping API calls)")
+
+            # Write reused results to output file
+            for conv_hash in reusable_hashes:
+                existing_result = reuse_results[conv_hash].copy()
+                existing_result['reused_from'] = args.reuse_from  # Mark as reused for tracking
+                append_result_to_file(existing_result, args.output, output_file_lock)
+                reused_count += 1
+
+            # Filter rows_to_process to only keep rows that need processing
+            rows_to_process = [row for row in rows_to_process if row.conversation_hash not in reusable_hashes]
+            print(f"Remaining conversations to process via API: {len(rows_to_process)}")
+        else:
+            print("No overlapping conversations found to reuse")
 
     # Show turn distribution
-    if len(df) > 0:
+    if len(rows_to_process) > 0:
         from collections import Counter
-        turn_counter = Counter(df['turn'])
+        turn_counter = Counter(row.turn for row in rows_to_process)
         print(f"\nTurn distribution:")
         cumulative = 0
         for turns in sorted(turn_counter.keys()):
             count = turn_counter[turns]
             cumulative += count
-            pct = count / len(df) * 100
-            cum_pct = cumulative / len(df) * 100
+            pct = count / len(rows_to_process) * 100
+            cum_pct = cumulative / len(rows_to_process) * 100
             bar = '#' * int(pct / 2)
             print(f"  {turns:2d} turns: {count:6,} ({pct:5.1f}%) cum:{cum_pct:5.1f}% {bar}")
 
     # Limit to first N if requested
     if args.limit:
         print(f"Limiting to first {args.limit} conversations...")
-        df = df.head(args.limit)
+        rows_to_process = rows_to_process[:args.limit]
 
-    if len(df) == 0:
+    if len(rows_to_process) == 0:
         print("\nNo new conversations to process!")
         return 0
 
     # Confirmation
-    if not args.skip_confirmation and len(df) > 50:
-        response = input(f"\nProcess {len(df)} conversations? (y/n): ")
+    if not args.skip_confirmation and len(rows_to_process) > 50:
+        response = input(f"\nProcess {len(rows_to_process)} conversations? (y/n): ")
         if response.lower() != 'y':
             print("Cancelled by user")
             return 0
 
-    # Prepare rows
-    rows_to_process = [(idx, row) for idx, row in df.iterrows()]
+    # Prepare rows as (index, row) tuples for process_row
+    rows_to_process = [(idx, row) for idx, row in enumerate(rows_to_process)]
 
     print(f"\n{'='*80}")
     print(f"PROCESSING CONFIGURATION")
@@ -648,6 +762,7 @@ def main():
     print(f"Output file:        {args.output}")
     if args.log_file:
         print(f"Log file:           {args.log_file}")
+        setup_file_logger(args.log_file)
     print(f"{'='*80}\n")
 
     # Process in parallel
@@ -687,7 +802,7 @@ def main():
                         result = future.result(timeout=args.timeout)
                         if result is not None:
                             # Save immediately to file
-                            append_result_to_file(result, args.output)
+                            append_result_to_file(result, args.output, output_file_lock)
                             output_data.append(result)
                             completed += 1
 

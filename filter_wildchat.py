@@ -45,9 +45,9 @@ from wildchat_utils import iter_jsonl, ReservoirSampler
 
 LANGUAGE_FILTER = "English"
 YEARS = [2023, 2024, 2025]
-SAMPLES_PER_YEAR = 5000
+SAMPLES_PER_YEAR = 15000
 MIN_TURNS = 1
-MAX_TURNS = 30
+MAX_TURNS = 50
 
 # IP capping disabled
 MAX_PER_IP = None
@@ -59,7 +59,7 @@ MIN_TEMPLATE_OCCURRENCES = 500  # threshold for "suspicious" templates
 
 # Paths
 INPUT_FILE = Path(__file__).parent / "data" / "wildchat" / "wildchat_train.jsonl"
-OUTPUT_FILE = Path(__file__).parent / "data" / "wildchat" / "filtered_15k.jsonl"
+OUTPUT_FILE = Path(__file__).parent / "data" / "wildchat" / "filtered_45k.jsonl"
 CACHE_FILE = Path(__file__).parent / "data" / "wildchat" / "template_analysis_cache.jsonl"
 
 RANDOM_SEED = 42
