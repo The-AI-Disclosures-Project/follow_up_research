@@ -258,6 +258,12 @@ def main():
     df_filtered = df[df['turns_match']].copy()
     print(f"Filtered to {len(df_filtered)} conversations with matching turns")
 
+    # Filter out o1 models (they don't have multiple turns at all)
+    excluded_models = ['o1-mini-2024-09-12', 'o1-preview-2024-09-12']
+    excluded_count = df_filtered['model'].isin(excluded_models).sum()
+    df_filtered = df_filtered[~df_filtered['model'].isin(excluded_models)].copy()
+    print(f"Excluded {excluded_count} conversations with o1 models, {len(df_filtered)} remaining")
+
     # Output 1: Flattened data (one row per turn)
     print("Creating flattened output...")
     flattened_data = []
