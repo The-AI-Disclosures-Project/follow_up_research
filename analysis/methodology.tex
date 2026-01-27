@@ -1,0 +1,264 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+
+\title{Survival Analysis of ChatGPT Conversation Duration:\\
+Do Follow-Up Suggestions Extend Engagement?}
+\author{AI Disclosures Project}
+\date{January 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We analyze conversation duration in ChatGPT using a discrete-time survival framework, examining whether follow-up suggestions extend conversations or whether observed increases in conversation length are driven by model capability improvements. Using 91,343 turn-level observations from 42,692 conversations (2023--2025), we find that (1) the tail of conversation length is getting heavier over time (Pareto $\alpha$ decreasing from 3.51 to 2.82), (2) suggestions are associated with \textit{higher} hazard of conversation ending (OR = 1.14, $p < 0.001$), suggesting a selection effect rather than a causal engagement mechanism, and (3) model capability and year effects are highly collinear, making it difficult to disentangle their contributions.
+\end{abstract}
+
+\section{Introduction}
+
+Large language model interfaces increasingly incorporate ``engagement features'' such as suggested follow-up prompts, designed to encourage users to continue conversations. A key question for AI governance and product design is whether these features genuinely extend engagement or merely appear at natural conversation endpoints.
+
+This analysis applies survival analysis methods to model the probability of conversation continuation conditional on turn number, model version, year, and whether suggestions were offered.
+
+\section{Data}
+
+\subsection{Source}
+
+We use data from WildChat, a dataset of ChatGPT conversations collected via browser extensions. The data includes turn-level observations with:
+
+\begin{itemize}
+    \item \textbf{Conversation identifiers}: Unique hash per conversation
+    \item \textbf{Turn structure}: Turn number within conversation, total turns
+    \item \textbf{Continuation outcome}: Whether user sent another message
+    \item \textbf{Suggestion indicators}: Count of suggestions shown, whether any were used
+    \item \textbf{Temporal variables}: Timestamp, year (2023--2025)
+    \item \textbf{Model information}: GPT version (e.g., gpt-4o-mini, gpt-3.5-turbo)
+    \item \textbf{Content features}: User and assistant word counts
+\end{itemize}
+
+\subsection{Sample Characteristics}
+
+\begin{table}[h]
+\centering
+\caption{Conversation Distribution by Year}
+\label{tab:desc_stats}
+\begin{tabular}{lrrrrrrr}
+\toprule
+Year & $n$ & Mean & SD & Median & P90 & P95 & P99 \\
+\midrule
+2023 & 14,915 & 2.32 & 2.73 & 1 & 5 & 7 & 14 \\
+2024 & 13,040 & 1.93 & 2.81 & 1 & 4 & 6 & 15 \\
+2025 & 14,737 & 2.14 & 3.42 & 1 & 4 & 7 & 18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A key feature of the data is the \textbf{heavy right tail}: while the median conversation length is 1 turn across all years, the 99th percentile ranges from 14 to 18 turns, with maximum lengths of 42--50 turns.
+
+\section{Methods}
+
+\subsection{Discrete-Time Survival Framework}
+
+We model conversation duration using a discrete-time hazard framework. Let $T$ denote the number of turns in a conversation. At each turn $t$, we observe whether the conversation continues ($Y_t = 0$) or ends ($Y_t = 1$), conditional on survival to turn $t$.
+
+The discrete-time hazard is:
+\begin{equation}
+h(t) = P(T = t \mid T \geq t) = P(Y_t = 1 \mid Y_1 = 0, \ldots, Y_{t-1} = 0)
+\end{equation}
+
+We model this using logistic regression:
+\begin{equation}
+\text{logit}[h(t \mid \mathbf{X})] = \beta_0 + \beta_1 \log(t) + \beta_2 \cdot \text{suggestion} + \beta_3 \cdot \text{year}_{2024} + \beta_4 \cdot \text{year}_{2025}
+\end{equation}
+
+The log-transform of turn number allows a flexible baseline hazard that captures the declining hazard observed empirically.
+
+\subsection{Power-Law Tail Analysis}
+
+To characterize the heavy tail, we fit a Pareto distribution to the survival function for $t \geq 5$:
+\begin{equation}
+P(T \geq t) \propto t^{-\alpha}
+\end{equation}
+
+where $\alpha$ is the tail exponent. Lower $\alpha$ indicates a heavier tail (more mass in extreme values).
+
+\subsection{Split-Population (Cure) Model}
+
+Given that 68.7\% of conversations end at turn 1, we consider a split-population model that separates:
+\begin{enumerate}
+    \item $\pi$: Probability of being a ``multi-turn'' user
+    \item $S(t \mid \text{uncured})$: Survival function for those who might continue
+\end{enumerate}
+
+This is implemented by fitting separate models for first-turn and later-turn hazards.
+
+\subsection{Identification Challenge}
+
+A key methodological challenge is that GPT model versions are highly collinear with year:
+\begin{itemize}
+    \item 2023: Dominated by gpt-3.5-turbo-0613, gpt-3.5-turbo-0301, gpt-4-0314
+    \item 2024: Dominated by gpt-4o-2024-08-06, gpt-4o-mini-2024-07-18
+    \item 2025: Dominated by gpt-4o-mini-2024-07-18, gpt-4.1-mini-2025-04-14
+\end{itemize}
+
+Only gpt-4o-mini-2024-07-18 spans two years (2024--2025), providing limited within-model variation for separating year effects from model capability effects.
+
+\section{Results}
+
+\subsection{Tail Is Getting Heavier Over Time}
+
+\begin{table}[h]
+\centering
+\caption{Pareto Tail Exponent by Year}
+\label{tab:pareto}
+\begin{tabular}{lrrr}
+\toprule
+Year & Pareto $\alpha$ & $R^2$ & $P(T > 10)$ \\
+\midrule
+2023 & 3.51 & 0.97 & 2.3\% \\
+2024 & 3.18 & 0.89 & 2.1\% \\
+2025 & 2.82 & 0.90 & 2.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Pareto exponent $\alpha$ is \textbf{decreasing} over time, indicating that the tail of conversation length is getting heavier. More conversations are reaching extreme lengths in 2025 compared to 2023.
+
+\subsection{Hazard Declines with Turn Number}
+
+\begin{table}[h]
+\centering
+\caption{Empirical Hazard by Turn Number}
+\label{tab:hazard}
+\begin{tabular}{lrrr}
+\toprule
+Turn & $n$ at risk & Hazard & Continuation Rate \\
+\midrule
+1 & 42,692 & 68.7\% & 31.3\% \\
+2 & 13,350 & 38.4\% & 61.6\% \\
+3 & 8,220 & 30.9\% & 69.1\% \\
+5 & 4,108 & 23.5\% & 76.5\% \\
+10 & 1,284 & 20.3\% & 79.7\% \\
+15 & 487 & 14.2\% & 85.8\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hazard of ending declines sharply with turn number, consistent with positive duration dependence: users who survive early turns are increasingly likely to continue.
+
+\subsection{Discrete-Time Hazard Model}
+
+\begin{table}[h]
+\centering
+\caption{Baseline Discrete-Time Hazard Model (Logistic Regression)}
+\label{tab:baseline}
+\begin{tabular}{lrrrr}
+\toprule
+Variable & $\beta$ & SE & OR & 95\% CI \\
+\midrule
+Intercept & 0.385 & 0.017 & 1.469 & [1.42, 1.52] \\
+$\log(\text{turn})$ & $-$1.078 & 0.010 & 0.340 & [0.33, 0.35] \\
+Suggestion given & 0.135 & 0.016 & 1.145 & [1.11, 1.18] \\
+Year 2024 & 0.343 & 0.018 & 1.410 & [1.36, 1.46] \\
+Year 2025 & 0.238 & 0.017 & 1.269 & [1.23, 1.31] \\
+\bottomrule
+\end{tabular}
+\begin{flushleft}
+\small{Note: $N = 91,343$ turn-level observations. All coefficients significant at $p < 0.001$. Pseudo $R^2 = 0.136$.}
+\end{flushleft}
+\end{table}
+
+\textbf{Key findings:}
+\begin{enumerate}
+    \item \textbf{Suggestion effect is \textit{positive} (counterintuitive)}: OR = 1.145 means suggestions are associated with 14.5\% \textit{higher} odds of ending. This suggests a \textbf{selection effect}: suggestions appear at natural stopping points, not that they cause earlier termination.
+
+    \item \textbf{Year effects}: Both 2024 (OR = 1.41) and 2025 (OR = 1.27) show higher hazard than 2023, after controlling for turn number and suggestions.
+
+    \item \textbf{Turn effect}: OR = 0.34 for $\log(\text{turn})$ confirms strong negative duration dependence---the longer a conversation has lasted, the lower the hazard of ending.
+\end{enumerate}
+
+\subsection{Split-Population Analysis}
+
+Separating first-turn from later-turn behavior reveals different dynamics:
+
+\begin{table}[h]
+\centering
+\caption{First-Turn vs. Later-Turn Models}
+\label{tab:split}
+\begin{tabular}{lrrrr}
+\toprule
+& \multicolumn{2}{c}{First Turn} & \multicolumn{2}{c}{Later Turns} \\
+\cmidrule(lr){2-3} \cmidrule(lr){4-5}
+Variable & OR & 95\% CI & OR & 95\% CI \\
+\midrule
+Suggestion given & 1.098 & [1.05, 1.15] & 1.198 & [1.15, 1.25] \\
+Year 2024 & 1.381 & [1.31, 1.46] & 1.449 & [1.37, 1.54] \\
+Year 2025 & 1.152 & [1.10, 1.21] & 1.410 & [1.34, 1.49] \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The suggestion effect is stronger in later turns (OR = 1.20) than at first turn (OR = 1.10), consistent with suggestions appearing at more critical decision points as conversations progress.
+
+\section{Discussion}
+
+\subsection{Interpreting the Suggestion Effect}
+
+The finding that suggestions are associated with \textit{higher} hazard of ending requires careful interpretation. Three explanations are possible:
+
+\begin{enumerate}
+    \item \textbf{Selection effect}: The algorithm shows suggestions precisely when it predicts the user is about to leave. The association is not causal but reflects the algorithm's targeting.
+
+    \item \textbf{Suggestions as ``closing'' signals}: Suggestions may inadvertently signal ``here are some things you could ask, but we're done with the current topic,'' prompting users to end.
+
+    \item \textbf{Suggestions improve quality at cost of length}: If suggestions help users get what they need faster, this could increase satisfaction while reducing conversation length.
+\end{enumerate}
+
+Without randomization of suggestion display, we cannot distinguish these mechanisms.
+
+\subsection{Model Capability vs. Engagement Design}
+
+The heavy collinearity between model version and year prevents clean identification of whether:
+\begin{itemize}
+    \item Newer models are more capable, resolving queries faster (shorter conversations)
+    \item Newer models are more engaging, leading to longer conversations
+    \item Platform design changes (suggestions, UI) drive the changes
+\end{itemize}
+
+The fact that 2024 shows the \textit{highest} hazard (shortest conversations) despite more advanced models suggests capability effects may dominate: better models resolve queries faster.
+
+\subsection{The Growing Heavy Tail}
+
+The decreasing Pareto $\alpha$ (3.51 → 2.82) indicates more extreme-length conversations over time. Possible explanations:
+\begin{enumerate}
+    \item \textbf{Power users}: A growing segment uses ChatGPT for extended tasks (coding, writing, analysis)
+    \item \textbf{Model capability}: Better models support more complex, multi-turn interactions
+    \item \textbf{Use case expansion}: New applications (agentic workflows, research assistance) inherently require more turns
+\end{enumerate}
+
+\section{Conclusion}
+
+This analysis provides three key findings:
+
+\begin{enumerate}
+    \item The tail of conversation duration is getting \textbf{heavier over time}, with more extreme-length conversations in 2025.
+
+    \item Follow-up suggestions are associated with \textbf{higher hazard of ending}, suggesting they appear at natural stopping points rather than extending engagement.
+
+    \item \textbf{Model capability and year effects cannot be cleanly separated}, requiring either instrumental variables or randomized experiments for causal identification.
+\end{enumerate}
+
+These findings have implications for AI platform design and transparency: reported engagement metrics should distinguish between ``more conversations'' and ``longer conversations,'' and the role of suggestion algorithms in shaping user behavior warrants further investigation.
+
+\section*{Data and Code Availability}
+
+Data and analysis code available at: \url{https://github.com/SrulyRosenblat/follow_up_research}
+
+\end{document}
