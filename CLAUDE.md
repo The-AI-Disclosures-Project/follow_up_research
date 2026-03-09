@@ -20,14 +20,21 @@ python filter_wildchat.py --analyze          # Analyze template distribution onl
 python filter_wildchat.py --analyze --refresh  # Force re-scan ignoring cache
 ```
 
-### 3. Extract Follow-ups (requires OPENROUTER_API_KEY)
+### 3. Classify Conversation Intent (requires OPENROUTER_API_KEY)
 ```bash
-python process_wildchat.py --input data/wildchat/filtered_45k.jsonl
-python process_wildchat.py --input data/wildchat/filtered_45k.jsonl --limit 100  # Test run
-python process_wildchat.py --reuse-from data/processed_data/old_results.jsonl    # Reuse existing
+python classify_conversation_intent.py --input data/wildchat/filtered_45k.jsonl
+python classify_conversation_intent.py --input data/wildchat/filtered_45k.jsonl --limit 100  # Test run
+python classify_conversation_intent.py --reuse-from data/processed_data/old_intents.jsonl     # Reuse existing
 ```
 
-### 4. Analyze Results
+### 4. Extract Follow-ups (requires OPENROUTER_API_KEY)
+```bash
+python extract_follow_up_suggestions.py --input data/wildchat/filtered_45k.jsonl
+python extract_follow_up_suggestions.py --input data/wildchat/filtered_45k.jsonl --limit 100  # Test run
+python extract_follow_up_suggestions.py --reuse-from data/processed_data/old_results.jsonl    # Reuse existing
+```
+
+### 5. Analyze Results
 ```bash
 python analyze_results.py
 ```
@@ -39,7 +46,8 @@ python analyze_results.py
 WildChat-4.8M (HuggingFace)
   → download_wildchat.py → data/wildchat/wildchat_train.jsonl
   → filter_wildchat.py   → data/wildchat/filtered_45k.jsonl
-  → process_wildchat.py  → data/processed_data/extracted_follow_ups_45k.jsonl
+  → classify_conversation_intent.py  → data/processed_data/conversation_intents_45k.jsonl
+  → extract_follow_up_suggestions.py  → data/processed_data/extracted_follow_ups_45k.jsonl
   → analyze_results.py   → data/minified/{analysis_data.jsonl, analysis_data_flattened.jsonl, summary_stats.json}
 ```
 
@@ -48,9 +56,10 @@ WildChat-4.8M (HuggingFace)
 **Memory Efficiency**: The codebase handles large datasets through streaming:
 - `wildchat_utils.py`: `ReservoirSampler` for bounded-memory random sampling, `WildChatReader` for line-by-line JSONL iteration
 - `filter_wildchat.py`: Two-pass approach (build indexes, then filter) with JSONL cache for template analysis
-- `process_wildchat.py`: Streams input, appends results incrementally, uses regex for hash extraction to avoid full JSON parsing
+- `classify_conversation_intent.py`: Streams input, classifies the opening turns, appends results incrementally, and reuses results by `conversation_hash`
+- `extract_follow_up_suggestions.py`: Streams input, appends results incrementally, uses regex for hash extraction to avoid full JSON parsing
 
-**Parallel Processing**: `process_wildchat.py` uses `ThreadPoolExecutor` with configurable workers (default 40) for concurrent API calls to OpenRouter.
+**Parallel Processing**: `classify_conversation_intent.py` and `extract_follow_up_suggestions.py` use `ThreadPoolExecutor` with configurable workers (default 40) for concurrent API calls to OpenRouter.
 
 **Incremental Processing**: Scripts track progress via `conversation_hash` and skip already-processed records, allowing safe resume after interruption.
 
@@ -68,6 +77,14 @@ The extraction model (DeepSeek v3.2) distinguishes:
 
 The prompt definition is in `system_prompt.md`.
 
+### Conversation Intent Classification
+
+The intent classifier uses the opening turns only:
+- If the conversation has at least 2 turns, classify from the opening `user + assistant + user` slice
+- If the conversation has fewer than 2 turns, classify from the first user message only
+
+The prompt definition is in `catagory_classification_prompt.md`.
+
 ## Configuration Constants
 
 Key values in `filter_wildchat.py`:
@@ -75,7 +92,12 @@ Key values in `filter_wildchat.py`:
 - `MIN_TEMPLATE_OCCURRENCES = 500` (threshold for banning repeated prompts)
 - `MIN_TEMPLATE_LENGTH = 500` chars, `TEMPLATE_SIGNATURE_LENGTH = 500` chars
 
-Key values in `process_wildchat.py`:
+Key values in `extract_follow_up_suggestions.py`:
+- Default model: `deepseek/deepseek-v3.2`
+- Default workers: 40
+- Default timeout: 180s per request
+
+Key values in `classify_conversation_intent.py`:
 - Default model: `deepseek/deepseek-v3.2`
 - Default workers: 40
 - Default timeout: 180s per request

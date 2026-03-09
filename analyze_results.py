@@ -3,6 +3,7 @@ Analyze follow-up suggestion results from the jan-15 dataset.
 Produces JSON outputs in data/processed_data/json/
 """
 
+import argparse
 import pandas as pd
 import json
 import math
@@ -18,6 +19,24 @@ def stream_jsonl(file_path):
     with open(file_path, 'r') as file:
         for line in file:
             yield json.loads(line)
+
+
+def load_intent_classifications(file_path):
+    """Load conversation intent classifications keyed by conversation_hash."""
+    if not file_path or not os.path.exists(file_path):
+        return {}
+
+    intent_lookup = {}
+    for record in stream_jsonl(file_path):
+        conv_hash = record.get('conversation_hash')
+        if not conv_hash:
+            continue
+        intent_lookup[conv_hash] = {
+            'conversation_intent_classification': record.get('conversation_intent_classification'),
+            'opening_messages_used': record.get('opening_messages_used'),
+            'opening_message_count_used': record.get('opening_message_count_used'),
+        }
+    return intent_lookup
 
 
 def calculate_turns(conversation):
@@ -113,10 +132,31 @@ def extract_follow_up_data(follow_up_data_row):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Analyze extracted follow-up suggestions and optionally merge conversation intent labels.')
+    parser.add_argument(
+        '--input',
+        type=str,
+        default='data/processed_data/extracted_follow_ups_45k.jsonl',
+        help='Path to extracted follow-up suggestions JSONL (default: data/processed_data/extracted_follow_ups_45k.jsonl)'
+    )
+    parser.add_argument(
+        '--source',
+        type=str,
+        default='data/wildchat/filtered_45k.jsonl',
+        help='Path to filtered WildChat source JSONL (default: data/wildchat/filtered_45k.jsonl)'
+    )
+    parser.add_argument(
+        '--intent-input',
+        type=str,
+        default='data/processed_data/conversation_intents_45k.jsonl',
+        help='Optional path to conversation intent classifications JSONL (default: data/processed_data/conversation_intents_45k.jsonl)'
+    )
+    args = parser.parse_args()
+
     # First pass: stream source metadata to build lookup (memory-efficient)
-    print("Streaming source metadata from filtered_45k.jsonl...")
+    print(f"Streaming source metadata from {args.source}...")
     source_metadata = {}
-    for record in stream_jsonl('data/wildchat/filtered_45k.jsonl'):
+    for record in stream_jsonl(args.source):
         conv_hash = record.get('conversation_hash')
         if conv_hash:
             # Calculate word counts immediately instead of storing full conversation
@@ -137,8 +177,14 @@ def main():
             }
     print(f"Loaded metadata for {len(source_metadata)} conversations")
 
-    print("Loading extracted follow-ups data...")
-    df = pd.read_json('data/processed_data/extracted_follow_ups_45k.jsonl', orient='records', lines=True)
+    intent_lookup = load_intent_classifications(args.intent_input)
+    if intent_lookup:
+        print(f"Loaded intent classifications for {len(intent_lookup)} conversations from {args.intent_input}")
+    else:
+        print(f"No intent classifications loaded from {args.intent_input}; continuing without intent merge")
+
+    print(f"Loading extracted follow-ups data from {args.input}...")
+    df = pd.read_json(args.input, orient='records', lines=True)
     df.index = df['index']
     df.drop(columns=['index'], inplace=True)
     print(f"Loaded {len(df)} conversations")
@@ -157,6 +203,9 @@ def main():
     toxics = []
     redacteds = []
     headers = []
+    conversation_intent_classifications = []
+    opening_messages_used_list = []
+    opening_message_count_used_list = []
     user_word_counts_per_turn = []
     assistant_word_counts_per_turn = []
     user_word_counts = []
@@ -176,6 +225,10 @@ def main():
         toxics.append(metadata.get('toxic'))
         redacteds.append(metadata.get('redacted'))
         headers.append(metadata.get('header'))
+        intent_data = intent_lookup.get(conv_hash, {})
+        conversation_intent_classifications.append(intent_data.get('conversation_intent_classification'))
+        opening_messages_used_list.append(intent_data.get('opening_messages_used'))
+        opening_message_count_used_list.append(intent_data.get('opening_message_count_used'))
 
         # Extract year from timestamp
         timestamp = metadata.get('timestamp')
@@ -214,6 +267,9 @@ def main():
     df['toxic'] = toxics
     df['redacted'] = redacteds
     df['header'] = headers
+    df['conversation_intent_classification'] = conversation_intent_classifications
+    df['opening_messages_used'] = opening_messages_used_list
+    df['opening_message_count_used'] = opening_message_count_used_list
     df['user_word_counts_per_turn'] = user_word_counts_per_turn
     df['assistant_word_counts_per_turn'] = assistant_word_counts_per_turn
     df['user_word_count'] = user_word_counts
@@ -305,6 +361,9 @@ def main():
                 'toxic': bool(toxic) if pd.notna(toxic) else None,
                 'redacted': bool(redacted) if pd.notna(redacted) else None,
                 'header': header,
+                'conversation_intent_classification': row.get('conversation_intent_classification'),
+                'opening_messages_used': row.get('opening_messages_used'),
+                'opening_message_count_used': int(row['opening_message_count_used']) if pd.notna(row['opening_message_count_used']) else None,
                 'turn': turn + 1,
                 'turns': turns,
                 'suggestion_given_count': suggestion_given_count,
@@ -339,6 +398,9 @@ def main():
             'toxic': bool(row['toxic']) if pd.notna(row['toxic']) else None,
             'redacted': bool(row['redacted']) if pd.notna(row['redacted']) else None,
             'header': row['header'],
+            'conversation_intent_classification': row.get('conversation_intent_classification'),
+            'opening_messages_used': row.get('opening_messages_used'),
+            'opening_message_count_used': int(row['opening_message_count_used']) if pd.notna(row['opening_message_count_used']) else None,
             'suggestions_given_per_turn': row['suggestions_given_per_turn'],
             'suggestion_used_flags_per_turn': row['suggestion_used_flags_per_turn'],
             'suggestion_used_counts_per_turn': row['suggestion_used_counts_per_turn'],

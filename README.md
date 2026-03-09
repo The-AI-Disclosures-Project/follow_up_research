@@ -9,7 +9,7 @@ This project studies how AI assistants offer follow-up suggestions (explicit off
 ## Pipeline
 
 ```
-WildChat-4.8M → Filter (15k sample) → Extract Follow-ups → Analyze
+WildChat-4.8M → Filter (15k sample) → {Classify Opening Intent, Extract Follow-ups} → Analyze
 ```
 
 ### 1. Download Dataset
@@ -30,9 +30,24 @@ Produces a 15,000 conversation sample (5,000 per year: 2023-2025) with:
 - Template filtering (removes bot-generated content with repeated prompts)
 - Deduplication by conversation hash
 
-### 3. Extract Follow-ups
+### 3. Classify Opening Intent
 ```bash
-python process_wildchat.py --input data/wildchat/filtered_15k.jsonl
+python classify_conversation_intent.py --input data/wildchat/filtered_15k.jsonl
+```
+
+Uses DeepSeek v3.2 via OpenRouter to classify each conversation's opening intent:
+- `EXPLORATORY`
+- `BUILDING`
+- `INFORMATIONAL`
+- `UNKNOWN`
+
+Classification uses the opening `user + assistant + user` slice for conversations with at least 2 turns, and the first user message only for shorter conversations.
+
+Requires `OPENROUTER_API_KEY` environment variable.
+
+### 4. Extract Follow-ups
+```bash
+python extract_follow_up_suggestions.py --input data/wildchat/filtered_15k.jsonl
 ```
 
 Uses DeepSeek v3.2 via OpenRouter to analyze each conversation and extract:
@@ -41,7 +56,7 @@ Uses DeepSeek v3.2 via OpenRouter to analyze each conversation and extract:
 
 Requires `OPENROUTER_API_KEY` environment variable.
 
-### 4. Analyze Results
+### 5. Analyze Results
 ```bash
 python analyze_results.py
 ```
@@ -81,8 +96,10 @@ Required packages:
 ```
 ├── download_wildchat.py      # Dataset download/streaming
 ├── filter_wildchat.py        # Filtering and sampling
-├── process_wildchat.py       # LLM-based extraction
+├── classify_conversation_intent.py  # Opening-intent classification
+├── extract_follow_up_suggestions.py  # LLM-based extraction
 ├── analyze_results.py        # Analysis and minification
+├── catagory_classification_prompt.md  # Intent classification prompt
 ├── wildchat_utils.py         # JSONL utilities, reservoir sampling
 ├── system_prompt.md          # Extraction prompt for LLM
 ├── FIELD_DOCUMENTATION.md    # Output field documentation

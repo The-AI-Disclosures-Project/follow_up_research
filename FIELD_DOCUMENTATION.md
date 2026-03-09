@@ -45,8 +45,23 @@ Produces a 15,000 conversation sample (5,000 per year) with:
 - Template/system prompt filtering (removes conversations starting with repeated prompts appearing 500+ times)
 - Deduplication by conversation hash
 
-### Step 3: Extract Follow-ups
-**Script**: `process_wildchat.py`
+### Step 3: Classify Opening Intent
+**Script**: `classify_conversation_intent.py`
+**Input**: `data/wildchat/filtered_15k.jsonl`
+**Output**: `data/processed_data/conversation_intents_45k.jsonl`
+
+Uses DeepSeek v3.2 to classify each conversation's opening intent as one of:
+- `EXPLORATORY`
+- `BUILDING`
+- `INFORMATIONAL`
+- `UNKNOWN`
+
+The classifier uses the opening `user + assistant + user` slice when a conversation has at least 2 turns, and falls back to the first user message otherwise.
+
+Logs are saved to `data/processed_data/conversation_intent_logs.txt`.
+
+### Step 4: Extract Follow-ups
+**Script**: `extract_follow_up_suggestions.py`
 **Input**: `data/wildchat/filtered_15k.jsonl`
 **Output**: `data/processed_data/extracted_follow_ups.jsonl`
 
@@ -56,7 +71,7 @@ Uses DeepSeek v3.2 to analyze each conversation and extract:
 
 Logs are saved to `data/processed_data/logs.txt`.
 
-### Step 4: Analyze & Minify
+### Step 5: Analyze & Minify
 **Script**: `analyze_results.py`
 **Input**: `data/processed_data/extracted_follow_ups.jsonl`
 **Output**: `data/minified/` directory containing:
@@ -190,4 +205,3 @@ Contains aggregate statistics:
 ## Notes
 - **Turn numbering**: 1-indexed in the flattened file. The arrays in the non-flattened file are 0-indexed.
 - **Suggestion IDs**: The extraction model assigns globally unique, sequential IDs to suggestions across the entire conversation. These IDs are used internally to track cross-turn references but are not included in the minified output.
-
