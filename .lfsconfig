@@ -1,0 +1,4 @@
+[lfs]
+	url = https://huggingface.co/datasets/Disclosures-SSRC/follow_up_research.git/info/lfs
+[lfs "https://huggingface.co/datasets/Disclosures-SSRC/follow_up_research.git/info/lfs"]
+	locksverify = false
